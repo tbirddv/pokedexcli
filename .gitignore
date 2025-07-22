@@ -1,1 +1,16 @@
 pokedexcli
+*.log
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.tmp
+*.cache
+*.swp
+*.bak
+*.orig
+vendor/
+bin/
