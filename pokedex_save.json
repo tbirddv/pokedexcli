@@ -1,0 +1,7 @@
+{
+  "last_location_id": 1,
+  "caught_pokemon": {
+    "bulbasaur": true,
+    "pidgey": true
+  }
+}

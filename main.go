@@ -2,36 +2,46 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
-	"strings"
+	"sync"
+	"time"
 
-	"github.com/tbirddv/pokedexcli/pokeapi"
+	"github.com/tbirddv/pokedexcli/internal/pokeapi"
+	"github.com/tbirddv/pokedexcli/internal/pokecache"
 )
 
-type clicommand struct {
-	name        string
-	description string
-	callback    func() error
-}
-
-type config struct {
-	lastLocationID int
-}
-
-func cleanInput(text string) []string {
-	cleaned := strings.TrimSpace(text)
-	cleanedSlice := []string{}
-	for _, s := range strings.Fields(cleaned) {
-		s = strings.ToLower(s) // Convert to lowercase
-		cleanedSlice = append(cleanedSlice, s)
-	}
-	return cleanedSlice
-}
 func commandinit() (map[string]clicommand, *config) {
-	config := &config{
-		lastLocationID: 0,
+	cfg := &config{
+		LastLocationID:      1,
+		UserInput:           "",
+		CaughtPokemon:       make(map[string]bool),            // Initialize caught Pokemon map
+		CachedCaughtPokemon: make(map[string]pokeapi.Pokemon), // Initialize cached caught Pokemon map
 	}
+
+	err := load(cfg) // Load configuration from file
+	if err != nil {
+		fmt.Println("Error loading Save File:", err)
+		*cfg = config{
+			LastLocationID:      1,
+			UserInput:           "",
+			CaughtPokemon:       make(map[string]bool),
+			CachedCaughtPokemon: make(map[string]pokeapi.Pokemon), // Reset config if loading fails
+		}
+	}
+
+	// Initialize dead resources
+	deadResources := &deadResources{
+		locationAreas: make(map[int]int),
+		reverseLA:     make(map[int]int),
+	}
+
+	// Initialize cache
+	ctx, cancel := context.WithCancel(context.Background())
+	exitGroup := &sync.WaitGroup{}
+	cache := pokecache.NewPokeCache(30*time.Second, ctx, exitGroup)
+
 	// Initialize commands with their names, descriptions, and callbacks
 	// The commands are defined as functions that will be called when the command is executed
 
@@ -39,7 +49,7 @@ func commandinit() (map[string]clicommand, *config) {
 	commands["exit"] = clicommand{
 		name:        "exit",
 		description: "Exit the Pokedex",
-		callback:    commandExit,
+		callback:    func() error { return commandExit(cfg, cancel, exitGroup) },
 	}
 
 	commands["help"] = clicommand{
@@ -51,95 +61,52 @@ func commandinit() (map[string]clicommand, *config) {
 	commands["map"] = clicommand{
 		name:        "map",
 		description: "List 20 locations in the Pokedex",
-		callback:    func() error { return commandMap(config) },
+		callback:    func() error { return commandMap(cfg, deadResources, cache) },
 	}
 
-	commands["mapback"] = clicommand{
+	commands["mapb"] = clicommand{
 		name:        "mapback",
 		description: "List 20 locations in the Pokedex in reverse order",
-		callback:    func() error { return commandMapBack(config) },
+		callback:    func() error { return commandMapBack(cfg, deadResources, cache) },
 	}
 
-	return commands, config
-}
-
-func commandExit() error {
-	fmt.Println("Closing the Pokedex... Goodbye!")
-	os.Exit(0)
-	return nil
-}
-
-func commandHelp(commands map[string]clicommand) error {
-	fmt.Println("Welcome to the Pokedex!")
-	fmt.Println("Usage:")
-	fmt.Println("")
-	for _, cmd := range commands {
-		fmt.Printf("%s: %s\n", cmd.name, cmd.description)
+	commands["explore"] = clicommand{
+		name:        "explore",
+		description: "List the pokemon found in a specified location",
+		callback:    func() error { return commandExplore(cfg, cache) },
 	}
-	return nil
-}
 
-func commandMap(c *config) error {
-	for i := 0; i < 20; i++ {
+	commands["catch"] = clicommand{
+		name:        "catch",
+		description: "Try to catch a specified Pokemon",
+		callback:    func() error { return commandCatch(cfg, cache) },
+	}
 
-		var location pokeapi.LocationArea
-		url := pokeapi.GenerateURL(fmt.Sprintf("location-area/%d", c.lastLocationID+i))
-		statusCode, _ := pokeapi.FetchStruct(url, &location)
-		switch {
-		case statusCode == 404:
-			for {
-				c.lastLocationID++
-				if c.lastLocationID+i > 1199 {
-					c.lastLocationID = 1 - i // Reset to 1 if we exceed the maximum location ID
-				}
-				url = pokeapi.GenerateURL(fmt.Sprintf("location-area/%d", c.lastLocationID+i))
-				statusCode, _ := pokeapi.FetchStruct(url, &location)
-				if statusCode == 200 {
-					break
-				}
-			}
-		}
-		fmt.Println(location.Name)
+	commands["inspect"] = clicommand{
+		name:        "inspect",
+		description: "Check the details of a caught Pokemon",
+		callback:    func() error { return commandInspectACaughtPokemon(cfg) },
 	}
-	c.lastLocationID += 20 // Update the last location ID for the next command
-	if c.lastLocationID > 1199 {
-		c.lastLocationID = c.lastLocationID - 1199
-	}
-	return nil
-}
 
-func commandMapBack(c *config) error {
-	for i := 0; i < 20; i++ {
-		var location pokeapi.LocationArea
-		url := pokeapi.GenerateURL(fmt.Sprintf("location-area/%d", c.lastLocationID-i))
-		statusCode, _ := pokeapi.FetchStruct(url, &location)
-		switch {
-		case statusCode == 404:
-			for {
-				c.lastLocationID--
-				if c.lastLocationID < 1 {
-					c.lastLocationID = 1199 + i // Reset to 1199 if we exceed the minimum location ID
-				}
-				url = pokeapi.GenerateURL(fmt.Sprintf("location-area/%d", c.lastLocationID-i))
-				statusCode, _ := pokeapi.FetchStruct(url, &location)
-				if statusCode == 200 {
-					break
-				}
-			}
-		}
-		fmt.Println(location.Name)
+	commands["save"] = clicommand{
+		name:        "save",
+		description: "Save the current state of the Pokedex",
+		callback:    func() error { return save(cfg) },
 	}
-	c.lastLocationID -= 20 // Update the last location ID for the next command
-	if c.lastLocationID < 1 {
-		c.lastLocationID = 1199 + c.lastLocationID
+
+	commands["pokedex"] = clicommand{
+		name:        "pokedex",
+		description: "Display a list of caught Pokemon",
+		callback:    func() error { return commandPokedex(cfg) },
 	}
-	return nil
+
+	return commands, cfg
 }
 
 func main() {
 	scanner := bufio.NewScanner(os.Stdin)
-	commands, config := commandinit()
-	if config == nil {
+	commands, cfg := commandinit()
+	if cfg == nil {
 		fmt.Println("Failed to initialize configuration.")
 		return
 	}
@@ -148,6 +115,9 @@ func main() {
 		_ = scanner.Scan()
 		input := scanner.Text()
 		cleanedInput := cleanInput(input)
+		if len(cleanedInput) > 1 {
+			cfg.UserInput = cleanedInput[1]
+		}
 		command, exists := commands[cleanedInput[0]]
 		if !exists {
 			fmt.Printf("Unknown command: %s\n", cleanedInput[0])
@@ -156,5 +126,6 @@ func main() {
 		if err := command.callback(); err != nil {
 			fmt.Printf("Error executing command '%s': %v\n", command.name, err)
 		}
+		cfg.UserInput = "" // Reset user input after command execution
 	}
 }
